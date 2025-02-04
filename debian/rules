@@ -1,0 +1,7 @@
+#!/usr/bin/make -f
+
+override_dh_strip_nondeterminism:
+	# Disables dh_strip_nondeterminism to speed up the debian package creation
+
+%:
+	dh $@
