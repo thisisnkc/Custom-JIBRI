@@ -1,27 +1,30 @@
 /*
- * Copyright @ 2018 Atlassian Pty Ltd
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- */
+* Copyright @ 2018 Atlassian Pty Ltd
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*
+*/
 
 package org.jitsi.jibri.capture.ffmpeg
 
 import org.jitsi.jibri.capture.Capturer
 import org.jitsi.jibri.capture.UnsupportedOsException
+import org.jitsi.jibri.capture.UnsupportedSinkTypeException
 import org.jitsi.jibri.capture.ffmpeg.util.FfmpegFileHandler
 import org.jitsi.jibri.config.Config
 import org.jitsi.jibri.sink.Sink
+import org.jitsi.jibri.sink.impl.FileSink
+import org.jitsi.jibri.sink.impl.StreamSink
 import org.jitsi.jibri.status.ComponentState
 import org.jitsi.jibri.util.JibriSubprocess
 import org.jitsi.jibri.util.OsDetector
@@ -33,37 +36,14 @@ import org.jitsi.jibri.util.ProcessState
 import org.jitsi.jibri.util.StatusPublisher
 import org.jitsi.jibri.util.getLoggerWithHandler
 import org.jitsi.metaconfig.config
-import org.jitsi.metaconfig.from
 import org.jitsi.utils.logging2.Logger
 import org.jitsi.utils.logging2.createChildLogger
+import java.io.File
 
 /**
- * Parameters which will be passed to ffmpeg
- */
-data class FfmpegExecutorParams(
-    val resolution: String = FfmpegCapturer.resolution,
-    val framerate: Int = FfmpegCapturer.framerate,
-    val videoEncodePreset: String = FfmpegCapturer.videoEncodePreset,
-    val queueSize: Int = FfmpegCapturer.queueSize,
-    val streamingMaxBitrate: Int = FfmpegCapturer.streamingMaxBitrate,
-    val streamingBufSize: Int = streamingMaxBitrate * 2,
-    // The range of the CRF scale is 0–51, where 0 is lossless,
-    // 23 is the default, and 51 is worst quality possible. A lower value
-    // generally leads to higher quality, and a subjectively sane range is
-    // 17–28. Consider 17 or 18 to be visually lossless or nearly so;
-    // it should look the same or nearly the same as the input but it
-    // isn't technically lossless.
-    // https://trac.ffmpeg.org/wiki/Encode/H.264#crf
-    val h264ConstantRateFactor: Int = FfmpegCapturer.h264ConstantRateFactor,
-    val gopSize: Int = framerate * 2,
-    val audioSource: String = FfmpegCapturer.audioSource,
-    val audioDevice: String = FfmpegCapturer.audioDevice
-)
-
-/**
- * [FfmpegCapturer] is responsible for launching ffmpeg, capturing from the
- * configured audio and video devices, and writing to the given [Sink]
- */
+* [FfmpegCapturer] is responsible for launching ffmpeg, capturing from the
+* configured audio and video devices, and writing to the given [Sink]
+*/
 class FfmpegCapturer(
     parentLogger: Logger,
     osDetector: OsDetector = OsDetector(),
@@ -77,22 +57,39 @@ class FfmpegCapturer(
     companion object {
         const val COMPONENT_ID = "Ffmpeg Capturer"
         private val ffmpegOutputLogger = getLoggerWithHandler("ffmpeg", FfmpegFileHandler())
-        val resolution: String by config("jibri.ffmpeg.resolution".from(Config.configSource))
-        val framerate: Int by config("jibri.ffmpeg.framerate".from(Config.configSource))
-        val videoEncodePreset: String by config("jibri.ffmpeg.video-encode-preset".from(Config.configSource))
-        val queueSize: Int by config("jibri.ffmpeg.queue-size".from(Config.configSource))
-        val streamingMaxBitrate: Int by config("jibri.ffmpeg.streaming-max-bitrate".from(Config.configSource))
-        val h264ConstantRateFactor: Int by config("jibri.ffmpeg.h264-constant-rate-factor".from(Config.configSource))
-        val audioSource: String by config("jibri.ffmpeg.audio-source".from(Config.configSource))
-        val audioDevice: String by config("jibri.ffmpeg.audio-device".from(Config.configSource))
+
+        val commandLinuxRecording: List<String> by config {
+            "jibri.ffmpeg.command-linux-recording".from(Config.configSource)
+        }
+        val commandLinuxStreaming: List<String> by config {
+            "jibri.ffmpeg.command-linux-streaming".from(Config.configSource)
+        }
+        val commandMacRecording: List<String> by config {
+            "jibri.ffmpeg.command-mac-recording".from(Config.configSource)
+        }
+        val commandMacStreaming: List<String> by config {
+            "jibri.ffmpeg.command-mac-streaming".from(Config.configSource)
+        }
     }
 
     init {
         val osType = osDetector.getOsType()
-        logger.debug { "Detected os as OS: $osType" }
+        logger.debug { "Detected OS: $osType" }
         getCommand = when (osType) {
-            OsType.MAC -> { sink: Sink -> getFfmpegCommandMac(FfmpegExecutorParams(), sink) }
-            OsType.LINUX -> { sink: Sink -> getFfmpegCommandLinux(FfmpegExecutorParams(), sink) }
+            OsType.MAC -> { sink: Sink ->
+                when (sink) {
+                    is StreamSink -> commandMacStreaming
+                    is FileSink -> commandMacRecording
+                    else -> throw UnsupportedSinkTypeException(sink)
+                } + listOf(sink.path)
+            }
+            OsType.LINUX -> { sink: Sink ->
+                when (sink) {
+                    is StreamSink -> commandLinuxStreaming
+                    is FileSink -> commandLinuxRecording
+                    else -> throw UnsupportedSinkTypeException(sink)
+                } + listOf(sink.path)
+            }
             else -> throw UnsupportedOsException()
         }
 
@@ -103,10 +100,48 @@ class FfmpegCapturer(
     /**
      * Start the capturer and write to the given [Sink].
      */
-    override fun start(sink: Sink) {
-        val command = getCommand(sink)
-        ffmpeg.launch(command)
+// override fun start(sink: Sink) {
+//     val file = File(sink.path)
+//     val sessionDir = file.parent ?: "."
+//     val baseName = file.nameWithoutExtension // gets "nativeappealsemphasizewest_2025-05-30-11-04-12"
+//     val m3u8Path = "$sessionDir/$baseName.m3u8"
+//     logger.info("sessionDir: ${sessionDir}")
+//     logger.info("baseName: ${baseName}")
+//     logger.info("m3u8Path: ${m3u8Path}")
+//     val command = getCommand(sink).map {
+//         it.replace("{session_dir}", sessionDir)
+//           .replace("{m3u8_path}", m3u8Path)
+//     }
+
+//     logger.info("Sink path: ${sink.path}")
+//     logger.info("Launching ffmpeg with command: ${command.joinToString(" ")}")
+//     ffmpeg.launch(command)
+// }
+
+override fun start(sink: Sink) {
+    val file = File(sink.path)
+    val sessionDir = file.parent ?: "."
+
+    val fullBaseName = file.nameWithoutExtension // e.g., "nativeappealsemphasizewest_2025-05-30-11-04-12"
+    val baseName = fullBaseName.substringBeforeLast("_") // removes the timestamp part
+
+    val m3u8Path = "$sessionDir/$baseName.m3u8"
+
+    logger.info("sessionDir: $sessionDir")
+    logger.info("baseName: $baseName")
+    logger.info("m3u8Path: $m3u8Path")
+
+    val command = getCommand(sink).map {
+        it.replace("{session_dir}", sessionDir)
+          .replace("{m3u8_path}", m3u8Path)
+          .replace("{base_name}", baseName)
     }
+
+    logger.info("Sink path: ${sink.path}")
+    logger.info("Launching ffmpeg with command: ${command.joinToString(" ")}")
+    ffmpeg.launch(command)
+}
+
 
     /**
      * Handle a [ProcessState] update from ffmpeg by parsing it into an [FfmpegEvent] and passing it to the state
@@ -140,3 +175,4 @@ class FfmpegCapturer(
      */
     override fun stop() = ffmpeg.stop()
 }
+ 

@@ -22,6 +22,7 @@
  import org.jitsi.jibri.config.XmppCredentials
  import org.jitsi.jibri.selenium.pageobjects.CallPage
  import org.jitsi.jibri.selenium.pageobjects.HomePage
+ import org.jitsi.metaconfig.config
  import org.jitsi.jibri.selenium.status_checks.EmptyCallStatusCheck
  import org.jitsi.jibri.selenium.status_checks.IceConnectionStatusCheck
  import org.jitsi.jibri.selenium.status_checks.LocalParticipantKickedStatusCheck
@@ -167,10 +168,12 @@
   * It implements [StatusPublisher] to publish its status
   */
  class JibriSelenium(
-     parentLogger: Logger,
-     private val jibriSeleniumOptions: JibriSeleniumOptions = JibriSeleniumOptions()
- ) : StatusPublisher<ComponentState>() {
-     private val logger = createChildLogger(parentLogger)
+     private val callParams: CallParams,
+     private val jibriSeleniumOptions: JibriSeleniumOptions = JibriSeleniumOptions(),
+     private val statusHandler: (ComponentState) -> Unit = {}
+ ) : StatusPublisher<ComponentState> {
+     private val appWebSocketUrl: String by config("jibri.app.websocket-url".from(Config.configSource))
+     private val logger = createChildLogger(Logger.getLogger(JibriSelenium::class.java.name))
      private var chromeDriver: ChromeDriver
      private var currCallUrl: String? = null
      private val stateMachine = SeleniumStateMachine()
@@ -241,7 +244,7 @@
              }
          }
          recurringCallStatusCheckTask = TaskPools.recurringTasksPool.scheduleAtFixedRate(15, TimeUnit.SECONDS, 15) {
-             val callPage = CallPage(chromeDriver)
+             val callPage = CallPage(chromeDriver, appWebSocketUrl)
              try {
                  // Run through each of the checks.  If we hit one that returns an event, then we stop and process the
                  // state transition from that event. Note: it's intentional that we stop at the first check that fails
@@ -277,17 +280,17 @@
       * Jibri is active
       */
      private fun addParticipantTrackers(callUrlInfo: CallUrlInfo) {
-         CallPage(chromeDriver).injectParticipantTrackerScript()
+         CallPage(chromeDriver, appWebSocketUrl).injectParticipantTrackerScript()
          logger.info("Injecting draw line script >>>>>>>      $callUrlInfo",)
-         CallPage(chromeDriver).drawLine(callUrlInfo.callUrl)
+         CallPage(chromeDriver, appWebSocketUrl).drawLine(callUrlInfo.callUrl)
          if (jibriSeleniumOptions.enableLocalParticipantStatusChecks) {
-             CallPage(chromeDriver).injectLocalParticipantTrackerScript()
+             CallPage(chromeDriver, appWebSocketUrl).injectLocalParticipantTrackerScript()
          }
      }
  
-     fun addToPresence(key: String, value: String): Boolean = CallPage(chromeDriver).addToPresence(key, value)
+     fun addToPresence(key: String, value: String): Boolean = CallPage(chromeDriver, appWebSocketUrl).addToPresence(key, value)
  
-     fun sendPresence(): Boolean = CallPage(chromeDriver).sendPresence()
+     fun sendPresence(): Boolean = CallPage(chromeDriver, appWebSocketUrl).sendPresence()
  
      /**
       * Join a web call with Selenium
@@ -323,7 +326,7 @@
                      localStorageValues["xmpp_conference_password_override"] = passcode
                  }
                  setLocalStorageValues(localStorageValues)
-                 if (!CallPage(chromeDriver).visit(callUrlInfo.callUrl)) {
+                 if (!CallPage(chromeDriver, appWebSocketUrl).visit(callUrlInfo.callUrl)) {
                      stateMachine.transition(SeleniumEvent.FailedToJoinCall)
                  } else {
                      startRecurringCallStatusChecks()
@@ -339,7 +342,7 @@
      }
  
      fun getParticipants(): List<Map<String, Any>> {
-         return CallPage(chromeDriver).getParticipants()
+         return CallPage(chromeDriver, appWebSocketUrl).getParticipants()
      }
  
      fun leaveCallAndQuitBrowser() {
@@ -363,7 +366,7 @@
          }
          logger.info("Leaving web call")
          try {
-             CallPage(chromeDriver).leave()
+             CallPage(chromeDriver, appWebSocketUrl).leave()
          } catch (t: Throwable) {
              logger.error("Error trying to leave the call", t)
          }
