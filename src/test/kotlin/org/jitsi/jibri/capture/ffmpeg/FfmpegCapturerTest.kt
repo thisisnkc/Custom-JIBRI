@@ -44,6 +44,7 @@ import org.jitsi.jibri.util.ProcessFailedToStart
 import org.jitsi.jibri.util.ProcessRunning
 import org.jitsi.jibri.util.ProcessState
 import org.jitsi.utils.logging2.Logger
+import org.jitsi.jibri.sink.impl.FileSink
 
 internal class FfmpegCapturerTest : ShouldSpec() {
     override fun isolationMode(): IsolationMode? = IsolationMode.InstancePerLeaf
@@ -52,7 +53,7 @@ internal class FfmpegCapturerTest : ShouldSpec() {
     private val ffmpeg: JibriSubprocess = mockk(relaxed = true)
     private val ffmpegStateHandler = slot<(ProcessState) -> Unit>()
     private val capturerStateUpdates = mutableListOf<ComponentState>()
-    private val sink: Sink = mockk()
+    private val sink: FileSink = io.mockk.spyk(FileSink(java.nio.file.Paths.get("/tmp"), "test"))
     private val logger: Logger = mockk(relaxed = true)
 
     private val ffmpegEncodingState = ProcessState(ProcessRunning(), "frame=42")
@@ -163,8 +164,7 @@ internal class FfmpegCapturerTest : ShouldSpec() {
                     verify { ffmpeg.launch(capture(commandCaptor), any()) }
                     commandCaptor.captured should contain("x11grab")
                     commandCaptor.captured should contain("alsa")
-                    commandCaptor.captured should contain("option1")
-                    commandCaptor.captured should contain("option2")
+                    commandCaptor.captured should contain(sink.path)
                 }
             }
         }

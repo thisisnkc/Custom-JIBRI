@@ -17,12 +17,19 @@
 
  package org.jitsi.jibri.selenium.pageobjects
 
- import org.jitsi.utils.logging2.createLogger
- import org.openqa.selenium.TimeoutException
- import org.openqa.selenium.remote.RemoteWebDriver
- import org.openqa.selenium.support.PageFactory
- import org.openqa.selenium.support.ui.WebDriverWait
- import kotlin.time.measureTimedValue
+import org.jitsi.utils.logging2.createLogger
+import org.openqa.selenium.TimeoutException
+import org.openqa.selenium.logging.LogType
+import org.openqa.selenium.logging.LoggingPreferences
+import org.openqa.selenium.remote.CapabilityType
+import org.openqa.selenium.remote.RemoteWebDriver
+import org.openqa.selenium.support.PageFactory
+import org.openqa.selenium.support.ui.WebDriverWait
+import java.util.logging.Level
+import kotlin.time.measureTimedValue
+
+// Participant filter script to exclude hidden participants
+private const val PARTICIPANT_FILTER_SCRIPT = "filter(p => !p.isHidden() && !p.isHiddenFromRecorder())"
  
  /**
   * Page object representing the in-call page on a jitsi-meet server.
@@ -31,10 +38,134 @@
   */
  class CallPage(driver: RemoteWebDriver) : AbstractPageObject(driver) {
      private val logger = createLogger()
+    
+     private val CONSOLE_LOGGER_SCRIPT = """
+     (() => {
+         /*************************************************
+          * 1. Preserve original console methods
+          *************************************************/
+         window._originalConsole = window._originalConsole || {
+             log: console.log,
+             error: console.error,
+             warn: console.warn,
+             debug: console.debug,
+             info: console.info
+         };
+     
+         /*************************************************
+          * 2. Initialize our custom log storage
+          *************************************************/
+         window._browserLogs = window._browserLogs || [];
+     
+         /*************************************************
+          * 3. Safe-stringify helper
+          *************************************************/
+         function safeStringify(value) {
+             try {
+                 if (value === null) return "null";
+                 if (value === undefined) return "undefined";
+     
+                 const t = typeof value;
+     
+                 if (t === "string") return value;  // plain string, not JSON.stringify
+                 if (t === "number" || t === "boolean") return String(value);
+     
+                 // Handle Errors
+                 if (value instanceof Error) {
+                     return value.name + ": " + value.message + "\\n" + value.stack;
+                 }
+     
+                 // Handle DOM elements safely
+                 if (value instanceof Element) {
+                     return "<Element " + value.tagName + ">";
+                 }
+     
+                 // Handle plain objects/arrays
+                 return JSON.stringify(value);
+             } catch (e) {
+                 return "[unstringifiable]";
+             }
+         }
+     
+         /*************************************************
+          * 4. Override console methods
+          *************************************************/
+         ['log', 'error', 'warn', 'debug', 'info'].forEach(method => {
+             console[method] = function(...args) {
+                 try {
+                     // Convert all arguments to clean strings
+                     const msg = args.map(a => safeStringify(a)).join(" ");
+     
+                     window._browserLogs.push({
+                         level: method.toUpperCase(),
+                         timestamp: new Date().toISOString(),
+                         message: msg
+                     });
+                 } catch (e) {
+                     // fallback if logging fails
+                     window._browserLogs.push({
+                         level: "ERROR",
+                         timestamp: new Date().toISOString(),
+                         message: "[console wrapper failure] " + String(e)
+                     });
+                 }
+     
+                 // Call original console method
+                 if (window._originalConsole[method]) {
+                     window._originalConsole[method].apply(console, args);
+                 }
+             };
+         });
+     
+         /*************************************************
+          * 5. Uncaught exception handler
+          *************************************************/
+         window.onerror = function(message, source, lineno, colno, error) {
+             const errMsg = safeStringify({
+                 message,
+                 source,
+                 line: lineno,
+                 column: colno,
+                 stack: error ? error.stack : "No stack"
+             });
+     
+             console.error("[Uncaught Error]", errMsg);
+         };
+     
+         /*************************************************
+          * 6. Unhandled Promise rejection handler
+          *************************************************/
+         window.onunhandledrejection = function(event) {
+             const reason = safeStringify(event.reason);
+             console.error("[Unhandled Promise Rejection]", reason);
+         };
+     
+         /*************************************************
+          * 7. Initialization marker
+          *************************************************/
+         console.log("[EnhancedConsole] Initialized");
+     
+         return true;
+     })();
+     """.trimIndent()
+     
  
      init {
-         PageFactory.initElements(driver, this)
-     }
+        PageFactory.initElements(driver, this)
+        initializeEnhancedLogging()
+    }
+    
+    /**
+     * Initialize enhanced logging in the browser
+     */
+    private fun initializeEnhancedLogging() {
+        try {
+            driver.executeScript(CONSOLE_LOGGER_SCRIPT)
+            logger.info("Enhanced browser console logging initialized")
+        } catch (e: Exception) {
+            logger.error("Failed to initialize enhanced logging: ${e.message}")
+        }
+    }
  
      override fun visit(url: String): Boolean {
          if (!super.visit(url)) {
@@ -120,169 +251,264 @@
      }
  
      fun drawLine(url: String): Boolean {
-         logger.info("Initializing drawLine with URL: $url")
-     
-         val result = driver.executeScript(
-             """
-             try {
-                 console.log('[drawLine] Initializing canvas setup');
-     
-                 // Ensure socket.io client is included only once
-                 if (typeof io === 'undefined') {
-                     console.log('[drawLine] Loading socket.io client');
-                     const script = document.createElement('script');
-                     script.src = 'https://cdn.socket.io/4.0.0/socket.io.min.js';
-                     document.head.appendChild(script);
-                     script.onload = () => initializeCanvas();
-                 } else {
-                     initializeCanvas();
-                 }
-     
-                 function initializeCanvas() {
-                     console.log('[drawLine] Setting up canvas and socket');
-     
-                     // Check if a canvas already exists to prevent duplicates
-                     if (document.getElementById('customCanvas')) {
-                         console.log('[drawLine] Canvas already exists, skipping creation');
-                         return;
-                     }
-     
-                     const canvas = document.createElement('canvas');
-                     canvas.id = 'customCanvas';
-                     canvas.width = window.innerWidth;
-                     canvas.height = window.innerHeight;
-                     canvas.style.position = 'absolute';
-                     canvas.style.top = '0';
-                     canvas.style.left = '0';
-                     canvas.style.zIndex = '1000';
-                     document.body.appendChild(canvas);
-     
-                     const ctx = canvas.getContext('2d');
-                     let color = 'white';
-     
-                     const link = window.location.href;
-                     console.log('[drawLine] Current URL:', link);
-     
-                     const meetingId = link.split('/')[3];
-                     console.log('[drawLine] Extracted Meeting ID:', meetingId);
-     
-                     // Avoid multiple socket connections
-                     if (window.activeSocket) {
-                         console.log('[drawLine] Existing socket found, disconnecting old instance');
-                         window.activeSocket.disconnect();
-                     }
-     
-                     const socket = io('https://b1c1-112-196-5-34.ngrok-free.app', {
-                         transports: ['websocket'],
-                         query: { roomID: meetingId }
-                     });
-     
-                     window.activeSocket = socket; // Store socket globally for cleanup
-     
-                     socket.on('connect', () => {
-                         console.log('[drawLine] Connected to server, Socket ID:', socket.id);
-                         socket.emit('client-ready');
-                     });
-     
-                     socket.on('disconnect', (reason) => {
-                         console.log('[drawLine] Disconnected from server, Reason:', reason);
-                     });
-     
-                     
-                     socket.on('get-canvas-state', () => {
-                         console.log('[drawLine] Sending canvas state, Socket ID:', socket.id);
-                         socket.emit('canvas-state', canvas.toDataURL());
-                     });
-     
-                     socket.on('canvas-state-from-server', (state) => {
-                         console.log('[drawLine] Received canvas state from server, Socket ID:', socket.id);
-                         const img = new Image();
-                         img.src = state;
-                         img.onload = () => {
-                             ctx.drawImage(img, 0, 0);
-                         };
-                     });
-     
-                     socket.on('draw-line', ({ prevPoint, currentPoint, color: receivedColor }) => {
-                         try {
-                             console.log('[drawLine] Received draw-line event');
-                             if (prevPoint?.x && prevPoint?.y && currentPoint?.x && currentPoint?.y) {
-                                 const scaledPrevPoint = {
-                                     x: (prevPoint.x / 100) * window.innerWidth,
-                                     y: (prevPoint.y / 100) * window.innerHeight
-                                 };
-     
-                                 const scaledCurrentPoint = {
-                                     x: (currentPoint.x / 100) * window.innerWidth,
-                                     y: (currentPoint.y / 100) * window.innerHeight
-                                 };
-     
-                                 const lineColor = receivedColor || color;
-                                 drawline(scaledPrevPoint, scaledCurrentPoint, ctx, lineColor);
-                             }
-                         } catch (error) {
-                             console.error('[drawLine] Error processing draw-line event:', error);
-                         }
-                     });
-     
-                     socket.on('clear', () => {
-                         console.log('[drawLine] Clearing canvas');
-                         ctx.clearRect(0, 0, canvas.width, canvas.height);
-                     });
-     
-                     const sendDimensions = () => {
-                         const userDimensions = { width: window.innerWidth, height: window.innerHeight };
-                         console.log('[drawLine] Sending window dimensions:', userDimensions);
-                         socket.emit('browser-dimensions', userDimensions);
-                     };
-                     sendDimensions();
-     
-                     window.addEventListener('resize', sendDimensions);
-     
-                     function drawline(prevPoint, currentPoint, ctx, color) {
-                         try {
-                             console.log('[drawLine] Drawing line:', prevPoint, currentPoint, color);
-                             ctx.beginPath();
-                             ctx.lineWidth = 5;
-                             ctx.moveTo(prevPoint.x, prevPoint.y);
-                             ctx.lineTo(currentPoint.x, currentPoint.y);
-                             ctx.strokeStyle = color;
-                             ctx.stroke();
-     
-                             ctx.fillStyle = color;
-                             ctx.beginPath();
-                             ctx.arc(prevPoint.x, prevPoint.y, 2, 0, 2 * Math.PI);
-                             ctx.fill();
-                         } catch (error) {
-                             console.error('[drawLine] Error in drawline function:', error);
-                         }
-                     }
-     
-                     window.addEventListener('beforeunload', () => {
-                         console.log('[drawLine] Cleaning up before page unload');
-                         if (window.activeSocket) {
-                             window.activeSocket.disconnect();
-                             window.activeSocket = null;
-                         }
-                         window.removeEventListener('resize', sendDimensions);
-                     });
-     
-                     console.log('[drawLine] Canvas and socket setup complete');
-                 }
-     
-                 return true;
-             } catch (e) {
-                 console.error('[drawLine] Error initializing drawLine:', e);
-                 return e.message;
-             }
-             """.trimMargin()
+        logger.info("Initializing drawLine with URL: $url")
+        
+        // Clear any existing logs
+        try {
+            driver.manage().logs().get(LogType.BROWSER)
+            driver.executeScript("if (window._browserLogs) window._browserLogs = [];")
+        } catch (e: Exception) {
+            logger.warn("Failed to clear logs: ${e.message}")
+        }
+    
+        val result =
+        
+        driver.executeScript(
+            """
+    // Prevent duplicate injections
+    if (!window.__drawLineInjected) {
+        window.__drawLineInjected = true;
+
+        const script = document.createElement('script');
+        script.type = 'text/javascript';
+        script.id = 'drawline-injector';
+
+        script.textContent = `
+            /*************************************************
+             * REDIRECT ALL CONSOLE OUTPUT TO window._browserLogs
+             *************************************************/
+            (function(){
+                if (!window._browserLogs) window._browserLogs = [];
+                const levels = ['log','info','warn','error','debug'];
+                levels.forEach(level => {
+                    const original = console[level];
+                    console[level] = function(...args) {
+                        try {
+                            window._browserLogs.push({
+                                level: level.toUpperCase(),
+                                message: args.map(a => {
+                                    try { return JSON.stringify(a); }
+                                    catch(e) { return String(a); }
+                                }).join(' '),
+                                timestamp: new Date().toISOString()
+                            });
+                        } catch(e){}
+
+                        original.apply(console, args);
+                    };
+                });
+
+
+                console.log('[drawLineInjector] <><> Console capture initialized');
+            })();
+
+
+            /*************************************************
+             * LOAD SOCKET.IO THEN RUN drawLine() 
+             *************************************************/
+            (function(){
+                console.log('[drawLineInjector] Starting injection');
+
+                function loadSocketIo(callback) {
+                    if (typeof io !== 'undefined') {
+                        console.log('[drawLineInjector] socket.io already loaded');
+                        return callback();
+                    }
+
+                    console.log('[drawLineInjector] Loading socket.io...');
+                    const s = document.createElement('script');
+                    s.src = 'https://cdn.socket.io/4.0.0/socket.io.min.js';
+                    s.onload = () => {
+                        console.log('[drawLineInjector] <> <> socket.io loaded');
+                        callback();
+                    };
+                    s.onerror = () => console.error('[drawLineInjector] Failed to load socket.io');
+                    document.head.appendChild(s);
+                }
+
+
+                /*************************************************
+                 * MAIN DRAW LINE FUNCTION
+                 *************************************************/
+                function drawLineInit() {
+                    console.log('[drawLineInjector] <> <> drawLineInit invoked');
+
+                    // Avoid double canvas creation
+                    if (document.getElementById('customCanvas')) {
+                        console.log('[drawLineInjector] Canvas already exists — skipping');
+                        return;
+                    }
+
+                    const canvas = document.createElement('canvas');
+                    canvas.id = 'customCanvas';
+                    canvas.width = window.innerWidth;
+                    canvas.height = window.innerHeight;
+                    canvas.style.position = 'absolute';
+                    canvas.style.top = '0';
+                    canvas.style.left = '0';
+                    canvas.style.zIndex = '1000';
+                    document.body.appendChild(canvas);
+
+                    console.log('[drawLineInjector] <> <> Canvas created:', canvas.width, canvas.height);
+
+                    const ctx = canvas.getContext('2d');
+
+                    const link = window.location.href;
+                    console.log('[drawLineInjector] <> <> <> Current URL:', link);
+
+                    const meetingId = link.split('/')[3];
+                    console.log('[drawLineInjector] <> <> <> Extracted Meeting ID:', meetingId);
+
+                    // Avoid duplicate sockets
+                    if (window.activeSocket) {
+                        console.log('[drawLineInjector] Disconnecting old socket');
+                        window.activeSocket.disconnect();
+                    }
+
+                    const socket = window.activeSocket = io('https://uat-samsung.maxicus.com', {
+                        transports: ['websocket'],
+                        query: { roomID: meetingId }
+                    });
+
+                    socket.on('connect', () => {
+                        console.log('[drawLineInjector] Socket connected:', socket.id);
+                        socket.emit('client-ready');
+                    });
+
+                    socket.on('disconnect', reason => {
+                        console.log('[drawLineInjector] Socket disconnected:', reason);
+                    });
+
+                    socket.on('get-canvas-state', () => {
+                        console.log('[drawLineInjector] get-canvas-state received');
+                        socket.emit('canvas-state', canvas.toDataURL());
+                    });
+
+                    socket.on('canvas-state-from-server', state => {
+                        console.log('[drawLineInjector] canvas-state-from-server received');
+                        const img = new Image();
+                        img.onload = () => ctx.drawImage(img, 0, 0);
+                        img.src = state;
+                    });
+
+                    socket.on('draw-line', ({prevPoint, currentPoint, color}) => {
+                        console.log('[drawLineInjector] draw-line event:', prevPoint, currentPoint);
+
+                        if (!prevPoint || !currentPoint) return;
+
+                        ctx.beginPath();
+                        ctx.lineWidth = 5;
+                        ctx.strokeStyle = color || 'white';
+                        ctx.moveTo(prevPoint.x / 100 * window.innerWidth, prevPoint.y / 100 * window.innerHeight);
+                        ctx.lineTo(currentPoint.x / 100 * window.innerWidth, currentPoint.y / 100 * window.innerHeight);
+                        ctx.stroke();
+                    });
+
+                    socket.on('clear', () => {
+                        console.log('[drawLineInjector] Clear event received');
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    });
+
+                    function sendDims() {
+                        const dims = { width: window.innerWidth, height: window.innerHeight };
+                        console.log('[drawLineInjector] Sending dimensions:', dims);
+                        socket.emit('browser-dimensions', dims);
+                    }
+
+                    sendDims();
+                    window.addEventListener('resize', sendDims);
+
+                    console.log('[drawLineInjector] drawLine setup complete');
+                }
+
+
+                /*************************************************
+                 * EXECUTE EVERYTHING
+                 *************************************************/
+                loadSocketIo(drawLineInit);
+            })();
+        `;
+
+        document.head.appendChild(script);
+        console.log("drawLineInjector script attached to DOM");
+    }
+""".trimMargin()
          )
      
-         return result is Boolean && result
+         // Add a small delay to allow logs to be captured
+        try {
+            Thread.sleep(1000)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        
+        // Capture and log browser console output
+        logBrowserConsoleLogs()
+
+         logger.info("drawLine JS result <><><><<><><><<><><><><><: $result")
+        return result is Boolean && result
+
      }
      
      
-     
+     /**
+     * Fetches browser console logs using Selenium and logs them to Jibri logs.
+     */
+    private fun logBrowserConsoleLogs() {
+        try {
+            // Get logs from Selenium's log interface
+            val logTypes = driver.manage().logs().availableLogTypes
+            logger.debug("Available log types: $logTypes")
+            
+            // Get browser console logs
+            val logs = driver.manage().logs().get(LogType.BROWSER)
+            if (logs != null && logs.all.isNotEmpty()) {
+                logs.forEach { entry ->
+                    val message = "[Browser ${entry.timestamp}] ${entry.level}: ${entry.message}"
+                    when (entry.level) {
+                        Level.SEVERE -> logger.error(message)
+                        Level.WARNING -> logger.warn(message)
+                        Level.INFO -> logger.info(message)
+                        Level.FINE, Level.FINER, Level.FINEST -> logger.debug(message)
+                        else -> logger.trace(message)
+                    }
+                }
+            } else {
+                logger.debug("No browser console logs available via Selenium log interface")
+            }
+            
+            // Get logs from our enhanced console logger
+            try {
+                @Suppress("UNCHECKED_CAST")
+                val consoleLogs = driver.executeScript("""
+                    return window._browserLogs || [];
+                """.trimIndent()) as? List<Map<String, Any?>>
+                
+                consoleLogs?.forEach { log ->
+                    val level = log["level"]?.toString()?.uppercase() ?: "UNKNOWN"
+                    val message = log["message"]?.toString() ?: ""
+                    val timestamp = log["timestamp"]?.toString() ?: ""
+                    
+                    when (level.uppercase()) {
+                        "ERROR" -> logger.error("[EnhancedConsole $timestamp] $message")
+                        "WARN" -> logger.warn("[EnhancedConsole $timestamp] $message")
+                        "INFO" -> logger.info("[EnhancedConsole $timestamp] $message")
+                        "DEBUG" -> logger.debug("[EnhancedConsole $timestamp] $message")
+                        else -> logger.trace("[EnhancedConsole $timestamp] $message")
+                    }
+                }
+                
+                // Clear logs after reading to avoid duplicates
+                driver.executeScript("window._browserLogs = [];")
+                
+            } catch (e: Exception) {
+                logger.warn("Failed to get enhanced console logs: ${e.message}")
+            }
+            
+        } catch (e: Exception) {
+            logger.error("Error in logBrowserConsoleLogs: ${e.message}", e)
+        }
+    } 
  
      fun injectParticipantTrackerScript(): Boolean {
          val result = driver.executeScript(
